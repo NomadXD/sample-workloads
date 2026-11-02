@@ -32,9 +32,6 @@ endpoints:
         # +required Visibilities: namespace, internal and/or external
         visibility:
           - external
-        # +optional An allowedEndpoints name of the component type, not an Endpoint type
-        # name (api-service: unmanaged -> unmanaged-http, managed -> managed-http)
-        via: unmanaged
       - # +optional Names the Endpoint; at most one entry of an endpoint may omit it
         name: internal
         visibility:
