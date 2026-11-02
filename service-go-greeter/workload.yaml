@@ -1,7 +1,8 @@
 # OpenChoreo Workload Descriptor
 # This file defines how your workload exposes endpoints and connects to other services.
 # It sits alongside your source code and gets converted to a Workload Custom Resource (CR).
-apiVersion: openchoreo.dev/v1alpha1
+# v1alpha2 is decoded strictly: an unknown key fails the build instead of being ignored.
+apiVersion: openchoreo.dev/v1alpha2
 
 # Basic metadata for the workload
 metadata:
@@ -12,18 +13,29 @@ metadata:
 # Endpoints define the network interfaces that this workload exposes to other services
 endpoints:
   - # +required Unique name for the endpoint
-    # This name will be used when generating the managed API and as the key in the CR map
     name: greeter-api
-    # +optional Visibility of the endpoint
-    # Allowed values: project, namespace, internal, external
-    visibility:
-      - external
     # +required Numeric port value that gets exposed via the endpoint
     port: 9090
-    # +required Type of traffic that the endpoint is accepting
-    # Allowed values: GraphQL, gRPC, TCP, UDP, HTTP, Websocket
-    type: HTTP
+    # +required Protocol the endpoint serves
+    # Allowed values: HTTP, gRPC, GraphQL, Websocket, TCP, UDP
+    protocol: HTTP
     # +optional The path to the schema definition file
-    # This is applicable to HTTP, GraphQL, and gRPC endpoint types
+    # This is applicable to HTTP, GraphQL, and gRPC endpoints
     # The path should be relative to the workload.yaml file location
     schemaFile: openapi.yaml
+    # +optional Endpoints that expose this endpoint beyond its project, one per entry.
+    # Each entry picks an Endpoint type from the component type's allowedEndpoints by
+    # its name (via); without via, the default type for the protocol is used.
+    expose:
+      - # +required Visibilities: namespace, internal and/or external
+        visibility:
+          - external
+        # +optional An allowedEndpoints name of the component type (api-service: managed)
+        via: managed
+        # +optional Parameters of the Endpoint type
+        parameters:
+          requireApiKey: false
+      - # +optional Names the Endpoint; at most one entry of an endpoint may omit it
+        name: internal
+        visibility:
+          - internal
