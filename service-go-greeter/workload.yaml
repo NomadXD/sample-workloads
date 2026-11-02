@@ -27,14 +27,14 @@ endpoints:
     # Each entry picks an Endpoint type from the component type's allowedEndpoints by
     # its name (via); without via, the default type for the protocol is used.
     expose:
-      - # +required Visibilities: namespace, internal and/or external
+      - # +optional Names the Endpoint; at most one entry of an endpoint may omit it
+        name: external
+        # +required Visibilities: namespace, internal and/or external
         visibility:
           - external
-        # +optional An allowedEndpoints name of the component type (api-service: managed)
-        via: managed
-        # +optional Parameters of the Endpoint type
-        parameters:
-          requireApiKey: false
+        # +optional An allowedEndpoints name of the component type, not an Endpoint type
+        # name (api-service: unmanaged -> unmanaged-http, managed -> managed-http)
+        via: unmanaged
       - # +optional Names the Endpoint; at most one entry of an endpoint may omit it
         name: internal
         visibility:
