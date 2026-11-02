@@ -1,0 +1,56 @@
+# OpenChoreo Workload Descriptor
+# This file defines how your workload exposes endpoints and connects to other services.
+# It sits alongside your source code and gets converted to a Workload Custom Resource (CR).
+# v1alpha2 is decoded strictly: an unknown key fails the build instead of being ignored.
+apiVersion: openchoreo.dev/v1alpha2
+
+# Basic metadata for the workload
+metadata:
+  # +required Name of the workload
+  name: go-greeter-api
+
+# +optional Incoming connection details for the component
+# Endpoints define the network interfaces that this workload exposes to other services
+endpoints:
+  - # +required Unique name for the endpoint
+    name: greeter-api
+    # +required Numeric port value that gets exposed via the endpoint
+    port: 9090
+    # +required Protocol the endpoint serves
+    # Allowed values: HTTP, gRPC, GraphQL, Websocket, TCP, UDP
+    protocol: HTTP
+    # +optional The path to the schema definition file, relative to this file
+    schemaFile: openapi.yaml
+    # +optional Endpoints that expose this endpoint beyond its project, one per entry.
+    #
+    # The api-service component type allows two Endpoint types for HTTP, each under a
+    # name in its allowedEndpoints:
+    #   unmanaged -> unmanaged-http (the default for HTTP): a plain gateway route
+    #   managed   -> managed-http: a route with rate limiting and optional API keys
+    # via picks one by that name. Without via, the default is used. A name the
+    # component type does not allow fails the build; it never falls back to the default.
+    expose:
+      # Public traffic goes through the managed gateway.
+      - # +optional Names the Endpoint; at most one entry of an endpoint may omit it
+        name: external
+        # +required Visibilities: namespace, internal and/or external
+        visibility:
+          - external
+        via: managed
+        # +optional Parameters of the Endpoint type (managed-http)
+        parameters:
+          # Public path the endpoint is served under
+          pathPrefix: /greeter-api
+          # Requests per minute the gateway admits, per gateway replica; excess gets 429
+          requestsPerMinute: 30
+          # Allow browsers to call the endpoint cross-origin, e.g. from an API console
+          cors: true
+          # Keys are set per environment on the Endpoint; leave this off until they are
+          requireApiKey: false
+      # Traffic from inside the organization takes a plain route.
+      - name: internal
+        visibility:
+          - internal
+        via: unmanaged
+        parameters:
+          pathPrefix: /greeter-api
