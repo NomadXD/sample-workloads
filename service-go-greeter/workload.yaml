@@ -32,7 +32,16 @@ endpoints:
         # +required Visibilities: namespace, internal and/or external
         visibility:
           - external
+        # +optional Parameters of the Endpoint type (unmanaged-http: cors, pathPrefix)
+        parameters:
+          # Allow browsers to call the endpoint cross-origin
+          cors: true
+          # Public path the endpoint is served under
+          pathPrefix: /greeter-service-source
       - # +optional Names the Endpoint; at most one entry of an endpoint may omit it
         name: internal
         visibility:
           - internal
+        parameters:
+          cors: true
+          pathPrefix: /greeter-service-source
