@@ -1,0 +1,27 @@
+# Endpoint greeter: one URL in front of two components. Written by hand, so it
+# carries no source-component label and the project owns it: deleting either
+# component leaves the Endpoint and its URL in place.
+#
+# It starts with all traffic on greeter-blue. greeter-green sits at weight 0,
+# so it may be missing or undeployed without blocking the Endpoint; the README
+# shifts the weights from there.
+apiVersion: openchoreo.dev/v1alpha1
+kind: Endpoint
+metadata:
+  name: greeter
+  namespace: default
+spec:
+  owner:
+    projectName: default
+  type:
+    kind: ClusterEndpointType
+    name: s3-http
+  visibility: [external]
+  autoDeploy: true
+  backendRefs:
+    - name: blue
+      component: {name: greeter-blue, endpoint: greeter-api}
+      weight: 100
+    - name: green
+      component: {name: greeter-green, endpoint: greeter-api}
+      weight: 0

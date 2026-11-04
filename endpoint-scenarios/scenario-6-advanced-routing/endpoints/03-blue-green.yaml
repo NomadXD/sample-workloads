@@ -1,0 +1,46 @@
+# Blue/green: two complete deployments behind one URL, and an atomic switch.
+#
+# Blue (trips-python) serves everyone. Green (trips-go) is live but gets only
+# preview traffic, by header, so it can be checked through the real URL before
+# the switch. The switch and the rollback are binding overrides in each
+# environment: instant, per environment, and no new release.
+apiVersion: openchoreo.dev/v1alpha1
+kind: Endpoint
+metadata:
+  name: trips-api
+  namespace: default
+spec:
+  owner:
+    projectName: default
+  type:
+    kind: ClusterEndpointType
+    name: http
+  visibility: [external]
+  autoDeploy: true
+  parameters:
+    pathPrefix: /trips
+  backendRefs:
+    - name: blue
+      component: {name: trips-python, endpoint: http}
+      weight: 100
+    - name: green
+      component: {name: trips-go, endpoint: http}
+      weight: 0
+    - name: green-preview
+      component: {name: trips-go, endpoint: http}
+      match:
+        headers: [{name: x-preview, value: green}]
+---
+# The switch in production. Roll back by swapping the weights again.
+apiVersion: openchoreo.dev/v1alpha1
+kind: EndpointReleaseBinding
+metadata:
+  name: trips-api-production
+  namespace: default
+spec:
+  owner: {projectName: default, endpointName: trips-api}
+  environment: production
+  endpointRelease: trips-api-7c9f5d
+  backendOverrides:
+    - {name: blue, weight: 0}
+    - {name: green, weight: 100}

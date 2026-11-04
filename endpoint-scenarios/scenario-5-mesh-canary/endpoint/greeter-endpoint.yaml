@@ -1,0 +1,28 @@
+# Endpoint greeter: one in-mesh host in front of two components, split 90/10.
+#
+#   http://greeter.<data-plane namespace>.svc.cluster.local
+#     ├── stable  90% ──► Service greeter-stable  (component greeter-stable, endpoint greeter-api)
+#     └── canary  10% ──► Service greeter-canary  (component greeter-canary, endpoint greeter-api)
+#
+# The Endpoint's name becomes a Service in the project's data-plane namespace,
+# beside the components' own Services, so it must not match a component name.
+apiVersion: openchoreo.dev/v1alpha1
+kind: Endpoint
+metadata:
+  name: greeter
+  namespace: default
+spec:
+  owner:
+    projectName: default
+  type:
+    kind: ClusterEndpointType
+    name: s5-mesh-http
+  visibility: [namespace]
+  autoDeploy: true
+  backendRefs:
+    - name: stable
+      component: {name: greeter-stable, endpoint: greeter-api}
+      weight: 90
+    - name: canary
+      component: {name: greeter-canary, endpoint: greeter-api}
+      weight: 10

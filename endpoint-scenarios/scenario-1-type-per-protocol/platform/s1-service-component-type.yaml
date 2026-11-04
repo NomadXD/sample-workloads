@@ -1,0 +1,235 @@
+# ClusterComponentType: s1-service
+#
+# Scenario 1: one Endpoint type per protocol. A copy of the default `service`
+# type whose endpoints are exposed only through Endpoints; it renders no routes
+# of its own. Each protocol has exactly one allowed type, marked default, so a
+# developer never picks one: the protocol decides.
+#
+#   HTTP, GraphQL, Websocket -> s1-http
+#   gRPC                     -> s1-grpc
+#
+# The entries carry no name, so there is nothing for a descriptor's `via` to
+# select. An endpoint whose protocol has no entry (TCP, UDP) cannot be exposed.
+apiVersion: openchoreo.dev/v1alpha1
+kind: ClusterComponentType
+metadata:
+  annotations:
+    openchoreo.dev/description: A long-running service whose endpoints are exposed through
+      one Endpoint type per protocol (scenario 1).
+    openchoreo.dev/display-name: Service (scenario 1)
+  name: s1-service
+spec:
+  allowedEndpoints:
+  - default: true
+    protocols:
+    - HTTP
+    - GraphQL
+    - Websocket
+    ref:
+      kind: ClusterEndpointType
+      name: s1-http
+  - default: true
+    protocols:
+    - gRPC
+    ref:
+      kind: ClusterEndpointType
+      name: s1-grpc
+  allowedTraits:
+  - kind: ClusterTrait
+    name: health-probes
+  - kind: ClusterTrait
+    name: horizontal-pod-autoscaler
+  - kind: ClusterTrait
+    name: observability-alert-rule
+  - kind: ClusterTrait
+    name: persistent-volume-claim
+  - kind: ClusterTrait
+    name: vertical-pod-autoscaler
+  allowedWorkflows:
+  - kind: ClusterWorkflow
+    name: paketo-buildpacks-builder
+  - kind: ClusterWorkflow
+    name: gcp-buildpacks-builder
+  - kind: ClusterWorkflow
+    name: dockerfile-builder
+  - kind: ClusterWorkflow
+    name: ballerina-buildpack-builder
+  environmentConfigs:
+    openAPIV3Schema:
+      $defs:
+        ResourceQuantity:
+          default: {}
+          properties:
+            cpu:
+              default: 100m
+              type: string
+            memory:
+              default: 256Mi
+              type: string
+          type: object
+        ResourceRequirements:
+          default: {}
+          properties:
+            limits:
+              $ref: '#/$defs/ResourceQuantity'
+            requests:
+              $ref: '#/$defs/ResourceQuantity'
+          type: object
+      properties:
+        imagePullPolicy:
+          default: IfNotPresent
+          enum:
+          - Always
+          - IfNotPresent
+          - Never
+          type: string
+        replicas:
+          default: 1
+          minimum: 0
+          type: integer
+        resources:
+          $ref: '#/$defs/ResourceRequirements'
+      type: object
+  resources:
+  - id: deployment
+    targetPlane: dataplane
+    template:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        labels: ${metadata.labels}
+        name: ${metadata.name}
+        namespace: ${metadata.namespace}
+      spec:
+        replicas: ${environmentConfigs.replicas}
+        selector:
+          matchLabels: ${metadata.podSelectors}
+        template:
+          metadata:
+            labels: ${metadata.podSelectors}
+          spec:
+            containers:
+            - args: |
+                ${has(workload.container.args) ? workload.container.args : oc_omit()}
+              command: |
+                ${has(workload.container.command) ? workload.container.command : oc_omit()}
+              env: ${dependencies.toContainerEnvs()}
+              envFrom: ${configurations.toContainerEnvFrom()}
+              image: ${workload.container.image}
+              imagePullPolicy: ${environmentConfigs.imagePullPolicy}
+              name: main
+              resources:
+                limits:
+                  cpu: ${environmentConfigs.resources.limits.cpu}
+                  memory: ${environmentConfigs.resources.limits.memory}
+                requests:
+                  cpu: ${environmentConfigs.resources.requests.cpu}
+                  memory: ${environmentConfigs.resources.requests.memory}
+              volumeMounts: ${configurations.toContainerVolumeMounts() + dependencies.toContainerVolumeMounts()}
+            volumes: ${configurations.toVolumes() + dependencies.toVolumes()}
+  - id: service
+    includeWhen: ${size(workload.endpoints) > 0}
+    targetPlane: dataplane
+    template:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        labels: ${metadata.labels}
+        name: '${metadata.releaseLineName == "" ? metadata.componentName : metadata.componentLineName}'
+        namespace: ${metadata.namespace}
+      spec:
+        ports: ${workload.toServicePorts()}
+        selector: ${metadata.podSelectors}
+        type: ClusterIP
+  - forEach: ${configurations.toConfigEnvsByContainer()}
+    id: env-config
+    targetPlane: dataplane
+    template:
+      apiVersion: v1
+      data: |
+        ${envConfig.envs.transformMapEntry(index, env, {env.name: env.value})}
+      kind: ConfigMap
+      metadata:
+        name: ${envConfig.resourceName}
+        namespace: ${metadata.namespace}
+    var: envConfig
+  - forEach: ${configurations.toConfigFileList()}
+    id: file-config
+    targetPlane: dataplane
+    template:
+      apiVersion: v1
+      data:
+        ${config.name}: |
+          ${config.value}
+      kind: ConfigMap
+      metadata:
+        name: ${config.resourceName}
+        namespace: ${metadata.namespace}
+    var: config
+  - forEach: ${configurations.toSecretEnvsByContainer()}
+    id: secret-env-external
+    targetPlane: dataplane
+    template:
+      apiVersion: external-secrets.io/v1
+      kind: ExternalSecret
+      metadata:
+        name: ${secretEnv.resourceName}
+        namespace: ${metadata.namespace}
+      spec:
+        data: |
+          ${secretEnv.envs.map(secret, {
+            "secretKey": secret.name,
+            "remoteRef": {
+              "key": secret.remoteRef.key,
+              ?"property": secret.remoteRef.?property
+            }
+          })}
+        refreshInterval: 15s
+        secretStoreRef:
+          kind: ClusterSecretStore
+          name: ${dataplane.secretStore}
+        target:
+          creationPolicy: Owner
+          name: ${secretEnv.resourceName}
+    var: secretEnv
+  - forEach: ${configurations.toSecretFileList()}
+    id: secret-file-external
+    targetPlane: dataplane
+    template:
+      apiVersion: external-secrets.io/v1
+      kind: ExternalSecret
+      metadata:
+        name: ${file.resourceName}
+        namespace: ${metadata.namespace}
+      spec:
+        data:
+        - remoteRef:
+            key: ${file.remoteRef.key}
+            property: |
+              ${has(file.remoteRef.property) ? file.remoteRef.property : oc_omit()}
+          secretKey: ${file.name}
+        refreshInterval: 15s
+        secretStoreRef:
+          kind: ClusterSecretStore
+          name: ${dataplane.secretStore}
+        target:
+          creationPolicy: Owner
+          name: ${file.resourceName}
+    var: file
+  validations:
+  - message: Service components must have at least one endpoint. Use 'deployment/worker'
+      for components without endpoints.
+    rule: ${size(workload.endpoints) > 0}
+  - message: Endpoints with 'external' visibility require gateway.ingress.external
+      to be configured on the Environment or DataPlane.
+    rule: |-
+      ${workload.endpoints.exists(name, ep, "external" in ep.visibility)
+        ? has(gateway.ingress) && has(gateway.ingress.external)
+        : true}
+  - message: Endpoints with 'internal' visibility require gateway.ingress.internal
+      to be configured on the Environment or DataPlane.
+    rule: |-
+      ${workload.endpoints.exists(name, ep, "internal" in ep.visibility)
+        ? has(gateway.ingress) && has(gateway.ingress.internal)
+        : true}
+  workloadType: deployment

@@ -1,0 +1,31 @@
+# Component greeter-blue: the blue side of the migration. Built from
+# service-go-variant-greeter, which answers with its VARIANT in the body and in
+# the X-Variant header. The descriptor sets VARIANT=primary; the README
+# overrides it to "blue" on the component's ReleaseBinding.
+#
+# The descriptor asks for no Endpoints, so the component is reachable from
+# outside only through the hand-made Endpoint in ../endpoint/.
+apiVersion: openchoreo.dev/v1alpha1
+kind: Component
+metadata:
+  name: greeter-blue
+  namespace: default
+spec:
+  owner:
+    projectName: default
+  autoDeploy: true
+  componentType:
+    kind: ClusterComponentType
+    name: deployment/s3-service
+  workflow:
+    kind: ClusterWorkflow
+    name: dockerfile-builder
+    parameters:
+      repository:
+        url: "https://github.com/openchoreo/sample-workloads"
+        revision:
+          branch: "main"
+        appPath: "/service-go-variant-greeter"
+      docker:
+        context: "/service-go-variant-greeter"
+        filePath: "/service-go-variant-greeter/Dockerfile"

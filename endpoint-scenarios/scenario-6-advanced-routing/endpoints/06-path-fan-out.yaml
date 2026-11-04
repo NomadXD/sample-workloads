@@ -1,0 +1,53 @@
+# Path fan-out: one API, several components behind it by path.
+#
+#   /shop/orders/...    -> orders (orders-beta for x-beta: true)
+#   /shop/payments/...  -> payments, 90/10 between its main line and line v2
+#   /shop/...           -> catalog (everything else)
+#
+# Match paths are relative to pathPrefix. Each backend's matched prefix,
+# /shop/orders for orders, is rewritten to that backend's own base path, so the
+# components need not share one. Backends with the same match form a group and
+# split its traffic by weight, as payments does.
+apiVersion: openchoreo.dev/v1alpha1
+kind: Endpoint
+metadata:
+  name: shop-api
+  namespace: default
+spec:
+  owner:
+    projectName: default
+  type:
+    kind: ClusterEndpointType
+    name: http
+  visibility: [external]
+  autoDeploy: true
+  parameters:
+    pathPrefix: /shop
+  backendRefs:
+    # Default group: everything no match below claims.
+    - name: catalog
+      component: {name: catalog, endpoint: http}
+
+    - name: orders
+      component: {name: orders, endpoint: http}
+      match:
+        path: {type: PathPrefix, value: /orders}
+    # More specific than /orders alone (same path, one header), so it wins for
+    # requests that carry the header.
+    - name: orders-beta
+      component: {name: orders, endpoint: http, releaseLine: beta}
+      match:
+        path: {type: PathPrefix, value: /orders}
+        headers: [{name: x-beta, value: "true"}]
+
+    # One group, two backends: the same match, split by weight.
+    - name: payments
+      component: {name: payments, endpoint: http}
+      weight: 90
+      match:
+        path: {type: PathPrefix, value: /payments}
+    - name: payments-v2
+      component: {name: payments, endpoint: http, releaseLine: v2}
+      weight: 10
+      match:
+        path: {type: PathPrefix, value: /payments}

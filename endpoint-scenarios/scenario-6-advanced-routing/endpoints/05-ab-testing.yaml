@@ -1,0 +1,58 @@
+# A/B testing: two variants of the trips API, each user held in one variant
+# for the whole experiment.
+#
+# trips-api: the application (or an edge) assigns users to a bucket and sets
+# the exp cookie. The Endpoint only routes on it, so assignment and analytics
+# stay in one place. No cookie, or any other value, gets variant A.
+apiVersion: openchoreo.dev/v1alpha1
+kind: Endpoint
+metadata:
+  name: trips-api
+  namespace: default
+spec:
+  owner:
+    projectName: default
+  type:
+    kind: ClusterEndpointType
+    name: http
+  visibility: [external]
+  autoDeploy: true
+  parameters:
+    pathPrefix: /trips
+  backendRefs:
+    - name: variant-a
+      component: {name: trips, endpoint: http}
+    - name: variant-b
+      component: {name: trips, endpoint: http, releaseLine: exp-b}
+      match:
+        cookies: [{name: exp, value: b}]
+---
+# trips-api-weighted: the gateway assigns users instead. Weights split new
+# users 80/20, and session persistence keeps each one on the variant they first
+# reached, for 7 days, through a cookie the gateway sets.
+apiVersion: openchoreo.dev/v1alpha1
+kind: Endpoint
+metadata:
+  name: trips-api-weighted
+  namespace: default
+spec:
+  owner:
+    projectName: default
+  type:
+    kind: ClusterEndpointType
+    name: http
+  visibility: [external]
+  autoDeploy: true
+  parameters:
+    pathPrefix: /trips
+  sessionPersistence:
+    type: Cookie
+    name: trips-variant
+    absoluteTimeout: 168h
+  backendRefs:
+    - name: variant-a
+      component: {name: trips, endpoint: http}
+      weight: 80
+    - name: variant-b
+      component: {name: trips, endpoint: http, releaseLine: exp-b}
+      weight: 20

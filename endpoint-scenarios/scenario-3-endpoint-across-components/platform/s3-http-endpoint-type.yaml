@@ -1,0 +1,136 @@
+# ClusterEndpointType: s3-http
+#
+# Scenario 3's type for an Endpoint written by hand that fronts several
+# components under one URL. The same route as scenario 1's s1-http: one
+# HTTPRoute per requested visibility, splitting traffic across the backends by
+# weight, whichever components they belong to.
+#
+#   external -> gateway.ingress.external
+#   internal -> gateway.ingress.internal
+#
+# A single rewrite filter serves every backend, so the components behind one
+# Endpoint must serve under the same base path. The hostname is unique per
+# Endpoint, environment and project; set environmentConfigs.hostname to use
+# your own domain instead.
+apiVersion: openchoreo.dev/v1alpha1
+kind: ClusterEndpointType
+metadata:
+  name: s3-http
+  annotations:
+    openchoreo.dev/display-name: HTTP (scenario 3)
+    openchoreo.dev/description: Routes HTTP, GraphQL and WebSocket traffic through the data plane gateway, split across backends by weight.
+spec:
+  parameters:
+    openAPIV3Schema:
+      type: object
+      properties:
+        pathPrefix:
+          type: string
+          default: /
+          description: Public path the endpoint is served under. Requests are rewritten to the backends' base path.
+        cors:
+          type: boolean
+          default: false
+          description: Allow browsers to call the endpoint cross-origin, e.g. from an API console.
+
+  environmentConfigs:
+    openAPIV3Schema:
+      type: object
+      properties:
+        hostname:
+          type: string
+          description: Optional hostname to serve the endpoint on in this environment, replacing the generated one.
+
+  validations:
+    - rule: '${backends.all(b, b.protocol in ["HTTP", "GraphQL", "Websocket"])}'
+      message: "s3-http only routes HTTP, GraphQL and Websocket workload endpoints."
+    # One rewrite filter serves every backend, so they must share a base path.
+    - rule: "${backends.all(b, b.basePath == backends[0].basePath)}"
+      message: "All backends of an s3-http Endpoint must serve under the same base path."
+
+  resources:
+    - id: httproute-external
+      includeWhen: '${"external" in visibility && gateway.?ingress.?external.hasValue()}'
+      template:
+        apiVersion: gateway.networking.k8s.io/v1
+        kind: HTTPRoute
+        metadata:
+          name: ${oc_generate_name(metadata.name, "external")}
+          namespace: ${metadata.namespace}
+          labels: '${oc_merge(metadata.labels, {"openchoreo.dev/endpoint-visibility": "external"})}'
+        spec:
+          parentRefs:
+            - name: ${gateway.ingress.external.name}
+              namespace: ${gateway.ingress.external.namespace}
+          hostnames: |
+            ${has(environmentConfigs.hostname)
+              ? [environmentConfigs.hostname]
+              : [gateway.ingress.external.?http, gateway.ingress.external.?https]
+                  .filter(g, g.hasValue()).map(g, g.value().host).distinct()
+                  .map(h, oc_dns_label(metadata.endpointName, metadata.environmentName, metadata.projectName, metadata.endpointNamespace) + "." + h)}
+          rules:
+            - matches:
+                - path:
+                    type: PathPrefix
+                    value: ${parameters.pathPrefix}
+              filters: |
+                ${[{"type": "URLRewrite", "urlRewrite": {"path": {"type": "ReplacePrefixMatch",
+                    "replacePrefixMatch": backends.size() > 0 ? backends[0].basePath : "/"}}}]
+                  + (parameters.cors ? [{"type": "CORS", "cors": {
+                      "allowOrigins": ["*"],
+                      "allowMethods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+                      "allowHeaders": ["*"], "exposeHeaders": ["*"], "allowCredentials": false}}] : [])}
+              backendRefs: '${backends.map(b, {"name": b.serviceName, "port": b.port, "weight": b.weight})}'
+
+    - id: httproute-internal
+      includeWhen: '${"internal" in visibility && gateway.?ingress.?internal.hasValue()}'
+      template:
+        apiVersion: gateway.networking.k8s.io/v1
+        kind: HTTPRoute
+        metadata:
+          name: ${oc_generate_name(metadata.name, "internal")}
+          namespace: ${metadata.namespace}
+          labels: '${oc_merge(metadata.labels, {"openchoreo.dev/endpoint-visibility": "internal"})}'
+        spec:
+          parentRefs:
+            - name: ${gateway.ingress.internal.name}
+              namespace: ${gateway.ingress.internal.namespace}
+          hostnames: |
+            ${[gateway.ingress.internal.?http, gateway.ingress.internal.?https]
+              .filter(g, g.hasValue()).map(g, g.value().host).distinct()
+              .map(h, oc_dns_label(metadata.endpointName, metadata.environmentName, metadata.projectName, metadata.endpointNamespace) + "." + h)}
+          rules:
+            - matches:
+                - path:
+                    type: PathPrefix
+                    value: ${parameters.pathPrefix}
+              filters:
+                - type: URLRewrite
+                  urlRewrite:
+                    path:
+                      type: ReplacePrefixMatch
+                      replacePrefixMatch: '${backends.size() > 0 ? backends[0].basePath : "/"}'
+              backendRefs: '${backends.map(b, {"name": b.serviceName, "port": b.port, "weight": b.weight})}'
+
+  # Where clients reach the endpoint for each requested visibility, reported on
+  # the EndpointReleaseBinding's status.urls. Built from the same gateway data as
+  # the routes' hostnames; the HTTPS listener wins when the gateway has one.
+  urls:
+    external:
+      includeWhen: '${gateway.?ingress.?external.?https.hasValue() || gateway.?ingress.?external.?http.hasValue()}'
+      scheme: '${gateway.ingress.external.?https.hasValue() ? "https" : "http"}'
+      host: |-
+        ${has(environmentConfigs.hostname) ? environmentConfigs.hostname
+          : oc_dns_label(metadata.endpointName, metadata.environmentName, metadata.projectName, metadata.endpointNamespace) + "." + gateway.ingress.external.?https.or(gateway.ingress.external.?http).value().host}
+      port: '${gateway.ingress.external.?https.or(gateway.ingress.external.?http).value().?port.orValue(gateway.ingress.external.?https.hasValue() ? 443 : 80)}'
+      path: ${parameters.pathPrefix}
+      security:
+        scheme: none
+    internal:
+      includeWhen: '${gateway.?ingress.?internal.?https.hasValue() || gateway.?ingress.?internal.?http.hasValue()}'
+      scheme: '${gateway.ingress.internal.?https.hasValue() ? "https" : "http"}'
+      host: '${oc_dns_label(metadata.endpointName, metadata.environmentName, metadata.projectName, metadata.endpointNamespace) + "." + gateway.ingress.internal.?https.or(gateway.ingress.internal.?http).value().host}'
+      port: '${gateway.ingress.internal.?https.or(gateway.ingress.internal.?http).value().?port.orValue(gateway.ingress.internal.?https.hasValue() ? 443 : 80)}'
+      path: ${parameters.pathPrefix}
+      security:
+        scheme: none

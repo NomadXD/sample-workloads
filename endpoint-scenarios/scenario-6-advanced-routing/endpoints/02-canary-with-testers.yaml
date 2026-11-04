@@ -1,0 +1,34 @@
+# Canary with testers: requests carrying x-canary: true always reach the
+# canary; everyone else is split by weight.
+#
+# A backend belongs to exactly one group, so the canary is listed twice: once
+# in the weighted default group, once under the header match. Both entries
+# point at the same release line; their names are only handles.
+apiVersion: openchoreo.dev/v1alpha1
+kind: Endpoint
+metadata:
+  name: trips-api
+  namespace: default
+spec:
+  owner:
+    projectName: default
+  type:
+    kind: ClusterEndpointType
+    name: http
+  visibility: [external]
+  autoDeploy: true
+  parameters:
+    pathPrefix: /trips
+  backendRefs:
+    # Default group: requests that match nothing below.
+    - name: stable
+      component: {name: trips, endpoint: http}
+      weight: 95
+    - name: canary
+      component: {name: trips, endpoint: http, releaseLine: next}
+      weight: 5
+    # Header group: testers, whatever the weights above.
+    - name: canary-testers
+      component: {name: trips, endpoint: http, releaseLine: next}
+      match:
+        headers: [{name: x-canary, value: "true"}]

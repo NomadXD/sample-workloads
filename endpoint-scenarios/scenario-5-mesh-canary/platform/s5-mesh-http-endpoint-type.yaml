@@ -1,0 +1,94 @@
+# ClusterEndpointType: s5-mesh-http
+#
+# Scenario 5's type for routing HTTP inside an Istio mesh. Where the gateway
+# types route traffic arriving at a gateway, this one routes traffic between
+# workloads: a caller's sidecar sends each request to one of the Endpoint's
+# backends, split by weight.
+#
+# It renders two objects in the project's data-plane namespace:
+#
+#   Service <endpoint>      The name callers dial. No selector and no pods: it
+#                           only gives the mesh a host and a VIP to intercept.
+#   VirtualService          On that host: every request goes to one backend's
+#                           own Service, picked by weight.
+#
+# The components keep their own Services; the Endpoint never replaces them.
+# Request namespace visibility so that callers in other projects of the
+# namespace may reach the backends' pods; callers in the same project always
+# can.
+#
+# Requires Istio on the data plane, with callers in the mesh: routing happens
+# in the caller's proxy. In ambient mode, set environmentConfigs.waypoint so
+# the host is bound to a waypoint, which does the L7 routing instead.
+apiVersion: openchoreo.dev/v1alpha1
+kind: ClusterEndpointType
+metadata:
+  name: s5-mesh-http
+  annotations:
+    openchoreo.dev/display-name: Mesh HTTP (scenario 5)
+    openchoreo.dev/description: In-mesh HTTP host that splits traffic across backends by weight with an Istio VirtualService.
+spec:
+  environmentConfigs:
+    openAPIV3Schema:
+      type: object
+      properties:
+        waypoint:
+          type: string
+          description: Ambient mode only. The waypoint that does L7 routing for this host in this environment.
+
+  validations:
+    - rule: '${backends.all(b, b.protocol == "HTTP")}'
+      message: "s5-mesh-http only routes HTTP workload endpoints."
+    - rule: '${visibility.all(v, v == "namespace")}'
+      message: "s5-mesh-http serves callers inside the data plane; request namespace visibility only."
+
+  resources:
+    - id: host
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${metadata.endpointName}
+          namespace: ${metadata.namespace}
+          labels: |
+            ${has(environmentConfigs.waypoint)
+              ? oc_merge(metadata.labels, {"istio.io/use-waypoint": environmentConfigs.waypoint})
+              : metadata.labels}
+        spec:
+          type: ClusterIP
+          ports:
+            - name: http
+              port: 80
+              appProtocol: http
+
+    - id: virtual-service
+      template:
+        apiVersion: networking.istio.io/v1
+        kind: VirtualService
+        metadata:
+          name: ${oc_generate_name(metadata.name, "mesh")}
+          namespace: ${metadata.namespace}
+          labels: ${metadata.labels}
+        spec:
+          hosts:
+            - ${metadata.endpointName + "." + metadata.namespace + ".svc.cluster.local"}
+          http:
+            - route: |
+                ${backends.map(b, {
+                  "destination": {
+                    "host": b.serviceName + "." + b.namespace + ".svc.cluster.local",
+                    "port": {"number": b.port}
+                  },
+                  "weight": b.weight
+                })}
+
+  # The in-mesh URL, reported on the EndpointReleaseBinding's status.urls.
+  # Deterministic: the Endpoint's name and the project's data-plane namespace
+  # for the environment.
+  urls:
+    namespace:
+      scheme: http
+      host: ${metadata.endpointName + "." + metadata.namespace + ".svc.cluster.local"}
+      port: "80"
+      security:
+        scheme: none

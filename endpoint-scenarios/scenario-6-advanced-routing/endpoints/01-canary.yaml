@@ -1,0 +1,54 @@
+# Canary: a release line takes a growing share of one URL.
+#
+# The Endpoint lists both lines of component trips. Its weights are the
+# defaults for a new environment: the canary starts at 0. Each environment's
+# binding then moves the split with backendOverrides, without cutting a new
+# EndpointRelease: staging runs 50/50 while production takes 5%.
+apiVersion: openchoreo.dev/v1alpha1
+kind: Endpoint
+metadata:
+  name: trips-api
+  namespace: default
+spec:
+  owner:
+    projectName: default
+  type:
+    kind: ClusterEndpointType
+    name: http
+  visibility: [external]
+  autoDeploy: true
+  parameters:
+    pathPrefix: /trips
+  backendRefs:
+    - name: stable
+      component: {name: trips, endpoint: http}
+      weight: 100
+    - name: canary
+      component: {name: trips, endpoint: http, releaseLine: next}
+      weight: 0
+---
+apiVersion: openchoreo.dev/v1alpha1
+kind: EndpointReleaseBinding
+metadata:
+  name: trips-api-staging
+  namespace: default
+spec:
+  owner: {projectName: default, endpointName: trips-api}
+  environment: staging
+  endpointRelease: trips-api-7c9f5d
+  backendOverrides:
+    - {name: stable, weight: 50}
+    - {name: canary, weight: 50}
+---
+apiVersion: openchoreo.dev/v1alpha1
+kind: EndpointReleaseBinding
+metadata:
+  name: trips-api-production
+  namespace: default
+spec:
+  owner: {projectName: default, endpointName: trips-api}
+  environment: production
+  endpointRelease: trips-api-7c9f5d
+  backendOverrides:
+    - {name: stable, weight: 95}
+    - {name: canary, weight: 5}

@@ -1,0 +1,42 @@
+# Mirroring: trips-go receives a copy of a quarter of the requests trips-python
+# answers. Clients only ever see trips-python's responses; trips-go's are
+# discarded.
+#
+# A mirror backend never answers, so it has no weight. It copies the traffic of
+# its own group: here the default group, since it has no match.
+apiVersion: openchoreo.dev/v1alpha1
+kind: Endpoint
+metadata:
+  name: trips-api
+  namespace: default
+spec:
+  owner:
+    projectName: default
+  type:
+    kind: ClusterEndpointType
+    name: http
+  visibility: [external]
+  autoDeploy: true
+  parameters:
+    pathPrefix: /trips
+  backendRefs:
+    - name: live
+      component: {name: trips-python, endpoint: http}
+      weight: 100
+    - name: shadow
+      component: {name: trips-go, endpoint: http}
+      mirror:
+        percent: 25
+---
+# Mirror everything in staging, nothing in production yet.
+apiVersion: openchoreo.dev/v1alpha1
+kind: EndpointReleaseBinding
+metadata:
+  name: trips-api-staging
+  namespace: default
+spec:
+  owner: {projectName: default, endpointName: trips-api}
+  environment: staging
+  endpointRelease: trips-api-7c9f5d
+  backendOverrides:
+    - {name: shadow, mirror: {percent: 100}}

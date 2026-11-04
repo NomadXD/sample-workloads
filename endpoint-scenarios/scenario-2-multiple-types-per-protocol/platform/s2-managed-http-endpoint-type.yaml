@@ -1,0 +1,199 @@
+# ClusterEndpointType: s2-managed-http
+#
+# Scenario 2's opt-in type for HTTP workload endpoints, chosen with
+# `via: managed`. Renders the same HTTPRoutes as s2-unmanaged-http, plus a
+# kgateway TrafficPolicy on them that enforces:
+#
+#   - API-key authentication (parameters.requireApiKey): clients send a key in
+#     the api-key header; the accepted keys come from environmentConfigs.apiKeys
+#     and are rendered into a Secret next to the route.
+#   - Local rate limiting (parameters.requestsPerMinute), per gateway replica.
+#
+# Requires the kgateway data plane gateway, and the data-plane cluster-agent
+# must be allowed to manage gateway.kgateway.dev trafficpolicies.
+apiVersion: openchoreo.dev/v1alpha1
+kind: ClusterEndpointType
+metadata:
+  name: s2-managed-http
+  annotations:
+    openchoreo.dev/display-name: Managed HTTP (scenario 2)
+    openchoreo.dev/description: HTTP route with API-key authentication and rate limiting enforced at the kgateway data plane gateway.
+spec:
+  parameters:
+    openAPIV3Schema:
+      type: object
+      properties:
+        pathPrefix:
+          type: string
+          default: /
+          description: Public path the endpoint is served under. Requests are rewritten to the backends' base path.
+        cors:
+          type: boolean
+          default: false
+          description: Allow browsers to call the endpoint cross-origin, e.g. from an API console.
+        requireApiKey:
+          type: boolean
+          default: true
+          description: Reject requests without a valid key in the api-key header. Keys are set per environment.
+        requestsPerMinute:
+          type: integer
+          default: 60
+          minimum: 1
+          description: Requests per minute the gateway admits, per gateway replica. Excess requests get 429.
+
+  environmentConfigs:
+    openAPIV3Schema:
+      type: object
+      properties:
+        hostname:
+          type: string
+          description: Optional hostname to serve the endpoint on in this environment, replacing the generated one.
+        apiKeys:
+          type: object
+          additionalProperties:
+            type: string
+          description: >-
+            API keys accepted in this environment, by client name. Demo only: the keys are stored in plain text on
+            the EndpointReleaseBinding and rendered into a Secret on the data plane.
+
+  validations:
+    - rule: '${backends.all(b, b.protocol == "HTTP")}'
+      message: "s2-managed-http only routes HTTP workload endpoints."
+    # One rewrite filter serves every backend, so they must share a base path.
+    - rule: "${backends.all(b, b.basePath == backends[0].basePath)}"
+      message: "All backends of an s2-managed-http Endpoint must serve under the same base path."
+
+  resources:
+    - id: httproute-external
+      includeWhen: '${"external" in visibility && gateway.?ingress.?external.hasValue()}'
+      template:
+        apiVersion: gateway.networking.k8s.io/v1
+        kind: HTTPRoute
+        metadata:
+          name: ${oc_generate_name(metadata.name, "external")}
+          namespace: ${metadata.namespace}
+          labels: '${oc_merge(metadata.labels, {"openchoreo.dev/endpoint-visibility": "external"})}'
+        spec:
+          parentRefs:
+            - name: ${gateway.ingress.external.name}
+              namespace: ${gateway.ingress.external.namespace}
+          hostnames: |
+            ${has(environmentConfigs.hostname)
+              ? [environmentConfigs.hostname]
+              : [gateway.ingress.external.?http, gateway.ingress.external.?https]
+                  .filter(g, g.hasValue()).map(g, g.value().host).distinct()
+                  .map(h, oc_dns_label(metadata.endpointName, metadata.environmentName, metadata.projectName, metadata.endpointNamespace) + "." + h)}
+          rules:
+            - matches:
+                - path:
+                    type: PathPrefix
+                    value: ${parameters.pathPrefix}
+              filters: |
+                ${[{"type": "URLRewrite", "urlRewrite": {"path": {"type": "ReplacePrefixMatch",
+                    "replacePrefixMatch": backends.size() > 0 ? backends[0].basePath : "/"}}}]
+                  + (parameters.cors ? [{"type": "CORS", "cors": {
+                      "allowOrigins": ["*"],
+                      "allowMethods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+                      "allowHeaders": ["*"], "exposeHeaders": ["*"], "allowCredentials": false}}] : [])}
+              backendRefs: '${backends.map(b, {"name": b.serviceName, "port": b.port, "weight": b.weight})}'
+
+    - id: httproute-internal
+      includeWhen: '${"internal" in visibility && gateway.?ingress.?internal.hasValue()}'
+      template:
+        apiVersion: gateway.networking.k8s.io/v1
+        kind: HTTPRoute
+        metadata:
+          name: ${oc_generate_name(metadata.name, "internal")}
+          namespace: ${metadata.namespace}
+          labels: '${oc_merge(metadata.labels, {"openchoreo.dev/endpoint-visibility": "internal"})}'
+        spec:
+          parentRefs:
+            - name: ${gateway.ingress.internal.name}
+              namespace: ${gateway.ingress.internal.namespace}
+          hostnames: |
+            ${[gateway.ingress.internal.?http, gateway.ingress.internal.?https]
+              .filter(g, g.hasValue()).map(g, g.value().host).distinct()
+              .map(h, oc_dns_label(metadata.endpointName, metadata.environmentName, metadata.projectName, metadata.endpointNamespace) + "." + h)}
+          rules:
+            - matches:
+                - path:
+                    type: PathPrefix
+                    value: ${parameters.pathPrefix}
+              filters:
+                - type: URLRewrite
+                  urlRewrite:
+                    path:
+                      type: ReplacePrefixMatch
+                      replacePrefixMatch: '${backends.size() > 0 ? backends[0].basePath : "/"}'
+              backendRefs: '${backends.map(b, {"name": b.serviceName, "port": b.port, "weight": b.weight})}'
+
+    # One policy covers every route this Endpoint renders.
+    - id: traffic-policy
+      includeWhen: '${("external" in visibility && gateway.?ingress.?external.hasValue()) || ("internal" in visibility && gateway.?ingress.?internal.hasValue())}'
+      template:
+        apiVersion: gateway.kgateway.dev/v1alpha1
+        kind: TrafficPolicy
+        metadata:
+          name: ${oc_generate_name(metadata.name, "policy")}
+          namespace: ${metadata.namespace}
+          labels: ${metadata.labels}
+        spec:
+          targetRefs: |
+            ${(("external" in visibility && gateway.?ingress.?external.hasValue())
+                ? [{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": oc_generate_name(metadata.name, "external")}]
+                : [])
+              + (("internal" in visibility && gateway.?ingress.?internal.hasValue())
+                ? [{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": oc_generate_name(metadata.name, "internal")}]
+                : [])}
+          rateLimit:
+            local:
+              tokenBucket:
+                maxTokens: ${parameters.requestsPerMinute}
+                tokensPerFill: ${parameters.requestsPerMinute}
+                fillInterval: 60s
+          apiKeyAuth: '${parameters.requireApiKey ? {"secretRef": {"name": oc_generate_name(metadata.name, "api-keys")}} : oc_omit()}'
+
+    # The keys apiKeyAuth checks: one entry per client. With no keys set for the
+    # environment every request is rejected until some are.
+    - id: api-keys
+      includeWhen: ${parameters.requireApiKey}
+      template:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: ${oc_generate_name(metadata.name, "api-keys")}
+          namespace: ${metadata.namespace}
+          labels: ${metadata.labels}
+        type: extauth.solo.io/apikey
+        stringData: '${environmentConfigs.?apiKeys.orValue({})}'
+
+  # Where clients reach the endpoint for each requested visibility, reported on
+  # the EndpointReleaseBinding's status.urls. Built from the same gateway data as
+  # the routes' hostnames; the HTTPS listener wins when the gateway has one. The
+  # TrafficPolicy covers both routes, so both declare the api-key header while
+  # requireApiKey is on.
+  urls:
+    external:
+      includeWhen: '${gateway.?ingress.?external.?https.hasValue() || gateway.?ingress.?external.?http.hasValue()}'
+      scheme: '${gateway.ingress.external.?https.hasValue() ? "https" : "http"}'
+      host: |-
+        ${has(environmentConfigs.hostname) ? environmentConfigs.hostname
+          : oc_dns_label(metadata.endpointName, metadata.environmentName, metadata.projectName, metadata.endpointNamespace) + "." + gateway.ingress.external.?https.or(gateway.ingress.external.?http).value().host}
+      port: '${gateway.ingress.external.?https.or(gateway.ingress.external.?http).value().?port.orValue(gateway.ingress.external.?https.hasValue() ? 443 : 80)}'
+      path: ${parameters.pathPrefix}
+      security:
+        scheme: '${parameters.requireApiKey ? "apiKey" : "none"}'
+        apiKey:
+          in: header
+          name: api-key
+    internal:
+      includeWhen: '${gateway.?ingress.?internal.?https.hasValue() || gateway.?ingress.?internal.?http.hasValue()}'
+      scheme: '${gateway.ingress.internal.?https.hasValue() ? "https" : "http"}'
+      host: '${oc_dns_label(metadata.endpointName, metadata.environmentName, metadata.projectName, metadata.endpointNamespace) + "." + gateway.ingress.internal.?https.or(gateway.ingress.internal.?http).value().host}'
+      port: '${gateway.ingress.internal.?https.or(gateway.ingress.internal.?http).value().?port.orValue(gateway.ingress.internal.?https.hasValue() ? 443 : 80)}'
+      path: ${parameters.pathPrefix}
+      security:
+        scheme: '${parameters.requireApiKey ? "apiKey" : "none"}'
+        apiKey:
+          in: header
+          name: api-key

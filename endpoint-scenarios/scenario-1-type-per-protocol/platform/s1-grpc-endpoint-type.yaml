@@ -1,0 +1,95 @@
+# ClusterEndpointType: s1-grpc
+#
+# Scenario 1's type for gRPC workload endpoints, and only those. For each
+# requested visibility it renders one GRPCRoute on that gateway:
+#
+#   external -> gateway.ingress.external
+#   internal -> gateway.ingress.internal
+#
+# gRPC has no base path: the request path is /<package>.<Service>/<Method>. So
+# an Endpoint is isolated by its hostname, which is unique per Endpoint,
+# environment and project. Every route splits traffic across the backends by
+# weight. Set environmentConfigs.hostname to use your own domain instead.
+apiVersion: openchoreo.dev/v1alpha1
+kind: ClusterEndpointType
+metadata:
+  name: s1-grpc
+  annotations:
+    openchoreo.dev/display-name: gRPC (scenario 1)
+    openchoreo.dev/description: Routes gRPC traffic through the data plane gateway, split across backends by weight.
+spec:
+  environmentConfigs:
+    openAPIV3Schema:
+      type: object
+      properties:
+        hostname:
+          type: string
+          description: Optional hostname to serve the endpoint on in this environment, replacing the generated one.
+
+  validations:
+    - rule: '${backends.all(b, b.protocol == "gRPC")}'
+      message: "s1-grpc only routes gRPC workload endpoints. Use s1-http for HTTP, GraphQL and Websocket backends."
+
+  resources:
+    - id: grpcroute-external
+      includeWhen: '${"external" in visibility && gateway.?ingress.?external.hasValue()}'
+      template:
+        apiVersion: gateway.networking.k8s.io/v1
+        kind: GRPCRoute
+        metadata:
+          name: ${oc_generate_name(metadata.name, "external")}
+          namespace: ${metadata.namespace}
+          labels: '${oc_merge(metadata.labels, {"openchoreo.dev/endpoint-visibility": "external"})}'
+        spec:
+          parentRefs:
+            - name: ${gateway.ingress.external.name}
+              namespace: ${gateway.ingress.external.namespace}
+          hostnames: |
+            ${has(environmentConfigs.hostname)
+              ? [environmentConfigs.hostname]
+              : [gateway.ingress.external.?http, gateway.ingress.external.?https]
+                  .filter(g, g.hasValue()).map(g, g.value().host).distinct()
+                  .map(h, oc_dns_label(metadata.endpointName, metadata.environmentName, metadata.projectName, metadata.endpointNamespace) + "." + h)}
+          rules:
+            - backendRefs: '${backends.map(b, {"name": b.serviceName, "port": b.port, "weight": b.weight})}'
+
+    - id: grpcroute-internal
+      includeWhen: '${"internal" in visibility && gateway.?ingress.?internal.hasValue()}'
+      template:
+        apiVersion: gateway.networking.k8s.io/v1
+        kind: GRPCRoute
+        metadata:
+          name: ${oc_generate_name(metadata.name, "internal")}
+          namespace: ${metadata.namespace}
+          labels: '${oc_merge(metadata.labels, {"openchoreo.dev/endpoint-visibility": "internal"})}'
+        spec:
+          parentRefs:
+            - name: ${gateway.ingress.internal.name}
+              namespace: ${gateway.ingress.internal.namespace}
+          hostnames: |
+            ${[gateway.ingress.internal.?http, gateway.ingress.internal.?https]
+              .filter(g, g.hasValue()).map(g, g.value().host).distinct()
+              .map(h, oc_dns_label(metadata.endpointName, metadata.environmentName, metadata.projectName, metadata.endpointNamespace) + "." + h)}
+          rules:
+            - backendRefs: '${backends.map(b, {"name": b.serviceName, "port": b.port, "weight": b.weight})}'
+
+  # Where gRPC clients connect for each requested visibility, reported on the
+  # EndpointReleaseBinding's status.urls. Built from the same gateway data as the
+  # routes' hostnames; the HTTPS listener wins when the gateway has one.
+  urls:
+    external:
+      includeWhen: '${gateway.?ingress.?external.?https.hasValue() || gateway.?ingress.?external.?http.hasValue()}'
+      scheme: '${gateway.ingress.external.?https.hasValue() ? "grpcs" : "grpc"}'
+      host: |-
+        ${has(environmentConfigs.hostname) ? environmentConfigs.hostname
+          : oc_dns_label(metadata.endpointName, metadata.environmentName, metadata.projectName, metadata.endpointNamespace) + "." + gateway.ingress.external.?https.or(gateway.ingress.external.?http).value().host}
+      port: '${gateway.ingress.external.?https.or(gateway.ingress.external.?http).value().?port.orValue(gateway.ingress.external.?https.hasValue() ? 443 : 80)}'
+      security:
+        scheme: none
+    internal:
+      includeWhen: '${gateway.?ingress.?internal.?https.hasValue() || gateway.?ingress.?internal.?http.hasValue()}'
+      scheme: '${gateway.ingress.internal.?https.hasValue() ? "grpcs" : "grpc"}'
+      host: '${oc_dns_label(metadata.endpointName, metadata.environmentName, metadata.projectName, metadata.endpointNamespace) + "." + gateway.ingress.internal.?https.or(gateway.ingress.internal.?http).value().host}'
+      port: '${gateway.ingress.internal.?https.or(gateway.ingress.internal.?http).value().?port.orValue(gateway.ingress.internal.?https.hasValue() ? 443 : 80)}'
+      security:
+        scheme: none
